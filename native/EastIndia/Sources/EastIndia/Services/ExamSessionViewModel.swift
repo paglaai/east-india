@@ -49,8 +49,65 @@ final class ExamSessionViewModel: ObservableObject {
         startPhase(.familiarisation)
     }
 
-    func beginListening() {
+    var listeningAudioURL: URL? {
+        state.listeningAudioPath.map { URL(fileURLWithPath: $0) }
+    }
+
+    var hasValidListeningAudio: Bool {
+        guard let listeningAudioURL else { return false }
+        return FileManager.default.fileExists(atPath: listeningAudioURL.path)
+    }
+
+    var canBeginListening: Bool {
+        state.phase == .finalInstructions
+            && state.audioSoundCheckCompleted
+            && hasValidListeningAudio
+    }
+
+    @discardableResult
+    func beginListening() -> Bool {
+        guard canBeginListening else { return false }
         startPhase(.listening)
+        return true
+    }
+
+    func importListeningAudio(from source: URL) throws {
+        let importedURL = try AudioService.copyAudioToAppSupport(from: source)
+        let oldPath = state.listeningAudioPath
+        let previousState = state
+        var next = state
+        next.listeningAudioPath = importedURL.path
+        next.listeningAudioDisplayName = source.lastPathComponent
+        next.listeningAudioHasStarted = false
+        guard update(next) else {
+            state = previousState
+            try? FileManager.default.removeItem(at: importedURL)
+            return
+        }
+
+        if let oldPath, oldPath != importedURL.path {
+            try? FileManager.default.removeItem(atPath: oldPath)
+        }
+    }
+
+    func completeSoundCheck() {
+        var next = state
+        next.audioSoundCheckCompleted = true
+        update(next)
+    }
+
+    @discardableResult
+    func markListeningAudioStarted() -> Bool {
+        guard state.phase == .listening,
+              !state.listeningAudioHasStarted else { return false }
+        var next = state
+        next.listeningAudioHasStarted = true
+        return update(next)
+    }
+
+    func beginListeningReview() {
+        guard state.phase == .listening else { return }
+        startPhase(.listeningReview)
     }
 
     func startPhase(_ phase: ExamPhase) {
@@ -140,6 +197,9 @@ final class ExamSessionViewModel: ObservableObject {
     }
 
     func startOver() {
+        if let audioPath = state.listeningAudioPath {
+            try? FileManager.default.removeItem(atPath: audioPath)
+        }
         store.clear()
         persistenceError = nil
         isScreenHiddenForBreak = false
@@ -147,19 +207,23 @@ final class ExamSessionViewModel: ObservableObject {
         persist()
     }
 
-    private func update(_ newState: ExamSessionState) {
+    @discardableResult
+    private func update(_ newState: ExamSessionState) -> Bool {
         var updated = newState
         updated.updatedAt = Date()
         state = updated
-        persist()
+        return persist()
     }
 
-    private func persist() {
+    @discardableResult
+    private func persist() -> Bool {
         do {
             try store.save(state)
             persistenceError = nil
+            return true
         } catch {
             persistenceError = "Your latest changes could not be saved locally: \(error.localizedDescription)"
+            return false
         }
     }
 

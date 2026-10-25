@@ -33,6 +33,7 @@ A native macOS practice simulator for computer-delivered English exams, with tim
 - The native macOS app is a Swift package under `native/EastIndia`; the pnpm workspace services are not part of its runtime.
 - Session state is stored as versioned JSON in local `UserDefaults` for this single-session prototype; no account, server, or database is required.
 - Timed sections persist an absolute deadline so closing the app does not pause the exam clock.
+- Listening audio is selected locally and copied into Application Support because security-scoped file access from the picker is temporary; its one-play marker is persisted with the session.
 - SwiftUI/AppKit compilation and runtime verification require Xcode on macOS; this Linux workspace cannot run the native app.
 
 ## Product

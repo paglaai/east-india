@@ -65,6 +65,10 @@ struct ExamSessionState: Codable {
     Discuss both views and give your own opinion. Write at least 250 words.
     """
     var writingResponse = ""
+    var listeningAudioPath: String?
+    var listeningAudioDisplayName: String?
+    var audioSoundCheckCompleted = false
+    var listeningAudioHasStarted = false
     var updatedAt = Date()
 
     static let sampleQuestions: [ExamQuestion] = [
@@ -87,4 +91,57 @@ struct ExamSessionState: Codable {
             options: ["TRUE", "FALSE", "NOT GIVEN"]
         )
     ]
+
+    private enum CodingKeys: String, CodingKey {
+        case phase
+        case remainingSeconds
+        case deadline
+        case currentQuestionIndex
+        case questions
+        case readingPassageTitle
+        case readingPassageText
+        case highlights
+        case writingPrompt
+        case writingResponse
+        case listeningAudioPath
+        case listeningAudioDisplayName
+        case audioSoundCheckCompleted
+        case listeningAudioHasStarted
+        case updatedAt
+    }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        phase = try values.decodeIfPresent(ExamPhase.self, forKey: .phase) ?? .intro
+        remainingSeconds = try values.decodeIfPresent(Int.self, forKey: .remainingSeconds) ?? 0
+        deadline = try values.decodeIfPresent(Date.self, forKey: .deadline)
+        currentQuestionIndex = try values.decodeIfPresent(Int.self, forKey: .currentQuestionIndex) ?? 0
+        questions = try values.decodeIfPresent([ExamQuestion].self, forKey: .questions) ?? Self.sampleQuestions
+        readingPassageTitle = try values.decodeIfPresent(String.self, forKey: .readingPassageTitle)
+            ?? "The History of Maritime Navigation"
+        readingPassageText = try values.decodeIfPresent(String.self, forKey: .readingPassageText)
+            ?? Self.defaultReadingPassage
+        highlights = try values.decodeIfPresent([HighlightRange].self, forKey: .highlights) ?? []
+        writingPrompt = try values.decodeIfPresent(String.self, forKey: .writingPrompt) ?? Self.defaultWritingPrompt
+        writingResponse = try values.decodeIfPresent(String.self, forKey: .writingResponse) ?? ""
+        listeningAudioPath = try values.decodeIfPresent(String.self, forKey: .listeningAudioPath)
+        listeningAudioDisplayName = try values.decodeIfPresent(String.self, forKey: .listeningAudioDisplayName)
+        audioSoundCheckCompleted = try values.decodeIfPresent(Bool.self, forKey: .audioSoundCheckCompleted) ?? false
+        listeningAudioHasStarted = try values.decodeIfPresent(Bool.self, forKey: .listeningAudioHasStarted) ?? false
+        updatedAt = try values.decodeIfPresent(Date.self, forKey: .updatedAt) ?? Date()
+    }
+
+    private static let defaultReadingPassage = """
+    For centuries, mariners relied on celestial navigation and coastal landmarks to traverse the world's oceans. While determining latitude was relatively straightforward by measuring the angle of the sun or pole star above the horizon, calculating longitude remained one of the greatest scientific challenges of the 18th century.
+
+    Without a reliable method to track time at sea, ships frequently lost their bearings, leading to catastrophic shipwrecks and disrupted trade routes. It was not until the invention of the marine chronometer that navigators could accurately compare local solar time with the time at a known reference point, thereby solving the longitude problem.
+    """
+
+    private static let defaultWritingPrompt = """
+    Some people believe that technological tools in education reduce face-to-face human interaction, while others argue they make learning far more accessible.
+
+    Discuss both views and give your own opinion. Write at least 250 words.
+    """
+
+    init() {}
 }
