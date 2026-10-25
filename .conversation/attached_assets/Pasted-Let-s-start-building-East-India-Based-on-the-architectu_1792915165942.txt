@@ -1,0 +1,658 @@
+Let’s start building East India. Based on the architectural blueprints in your notebook, we will build a native macOS app using SwiftUI (with AppKit via NSViewRepresentable where rich text highlighting is needed), backed by a clean modular structure (Domain, Data, Services, and UI).
+Here is the Phase 1 Core Foundation code to get your Xcode project up and running immediately. It includes the App Entry Point, the Exam State Machine, the Top Countdown Timer (with 10-minute and 5-minute flashing warnings), the Split-Screen Reading View, the Live-Word-Count Writing View, the Bottom Navigation Bar with Question Flagging, and the Screen-Dimming "Hide/Break" overlay.
+1. Xcode Project Setup & Directory Structure
+Create a new macOS App in Xcode named EastIndia (Interface: SwiftUI, Language: Swift) and organize your folders as outlined in the specification:
+EastIndia/
+├── App/
+│   └── EastIndiaApp.swift
+├── Domain/
+│   └── Models/
+│       └── ExamModels.swift
+├── Services/
+│   ├── AudioService.swift
+│   ├── CalendarService.swift
+│   └── NotificationService.swift
+└── UI/
+    ├── ExamContainerView.swift
+    ├── Components/
+    │   ├── TimerHeaderView.swift
+    │   └── QuestionNavBar.swift
+    └── Modules/
+        ├── ListeningView.swift
+        ├── ReadingSplitView.swift
+        └── WritingSplitView.swift
+
+2. Domain Models & State Machine (Domain/Models/ExamModels.swift)
+This file defines the exam flow state machine (Intro → Familiarisation → Instructions → Listening → Reading → Writing → Complete), question structures, user answers, flags, and highlights.
+import Foundation
+import SwiftUI
+
+enum ExamPhase: Equatable {
+    case intro
+    case familiarisation
+    case finalInstructions
+    case listening(isReviewWindow: Bool) // 30m audio + 2m review
+    case reading                         // 60m
+    case writing                         // 60m
+    case completed
+}
+
+struct HighlightRange: Identifiable, Codable {
+    var id = UUID()
+    let rangeLocation: Int
+    let rangeLength: Int
+    var note: String?
+}
+
+struct ExamQuestion: Identifiable {
+    let id: Int
+    let number: Int
+    let prompt: String
+    let options: [String]? // nil for fill-in-the-blank
+    var userAnswer: String = ""
+    var isFlagged: Bool = false
+}
+
+@MainActor
+class ExamSessionViewModel: ObservableObject {
+    @Published var currentPhase: ExamPhase = .intro
+    @Published var remainingSeconds: Int = 0
+    @Published var isScreenHiddenForBreak: Bool = false
+    @Published var currentQuestionIndex: Int = 0
+    
+    // Sample Reading State
+    @Published var readingPassageTitle: String = "The History of Maritime Navigation"
+    @Published var readingPassageText: String = """
+    For centuries, mariners relied on celestial navigation and coastal landmarks to traverse the world's oceans. While determining latitude was relatively straightforward by measuring the angle of the sun or pole star above the horizon, calculating longitude remained one of the greatest scientific challenges of the 18th century.
+    
+    Without a reliable method to track time at sea, ships frequently lost their bearings, leading to catastrophic shipwrecks and disrupted trade routes. It was not until the invention of the marine chronometer that navigators could accurately compare local solar time with the time at a known reference point, thereby solving the longitude problem.
+    """
+    @Published var highlights: [HighlightRange] = []
+    @Published var questions: [ExamQuestion] = [
+        ExamQuestion(id: 1, number: 1, prompt: "Determining latitude required measuring the angle of celestial bodies above the _________.", options: nil),
+        ExamQuestion(id: 2, number: 2, prompt: "Which invention finally resolved the longitude problem?", options: ["The astrolabe", "The marine chronometer", "The magnetic compass", "Celestial charts"]),
+        ExamQuestion(id: 3, number: 3, prompt: "Calculating longitude was easier than calculating latitude in the 18th century.", options: ["TRUE", "FALSE", "NOT GIVEN"])
+    ]
+    
+    // Sample Writing State
+    @Published var writingPrompt: String = "Some people believe that technological tools in education reduce face-to-face human interaction, while others argue they make learning far more accessible.\n\nDiscuss both views and give your own opinion. Write at least 250 words."
+    @Published var writingResponse: String = ""
+    
+    private var timerTask: Task<Void, Never>?
+    
+    var wordCount: Int {
+        writingResponse
+            .split { $0.isWhitespace || $0.isNewline }
+            .count
+    }
+    
+    // Triggered when warning thresholds (10 min / 5 min) are reached in Reading or Writing
+    var isTimerFlashingWarning: Bool {
+        switch currentPhase {
+        case .reading, .writing:
+            return remainingSeconds <= 600 && remainingSeconds > 0 // Last 10 mins
+        default:
+            return false
+        }
+    }
+    
+    var isTimerCriticalWarning: Bool {
+        switch currentPhase {
+        case .reading, .writing:
+            return remainingSeconds <= 300 && remainingSeconds > 0 // Last 5 mins
+        default:
+            return false
+        }
+    }
+    
+    func startPhase(_ phase: ExamPhase) {
+        currentPhase = phase
+        currentQuestionIndex = 0
+        
+        switch phase {
+        case .listening(let isReview):
+            remainingSeconds = isReview ? 120 : 1800 // 2m review or 30m audio
+            startCountdown()
+        case .reading, .writing:
+            remainingSeconds = 3600 // 60 minutes
+            startCountdown()
+        default:
+            stopCountdown()
+        }
+    }
+    
+    private func startCountdown() {
+        stopCountdown()
+        timerTask = Task {
+            while !Task.isCancelled && remainingSeconds > 0 {
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                if !Task.isCancelled {
+                    remainingSeconds -= 1
+                    if remainingSeconds == 0 {
+                        handleTimeExpired()
+                    }
+                }
+            }
+        }
+    }
+    
+    func stopCountdown() {
+        timerTask?.cancel()
+        timerTask = nil
+    }
+    
+    private func handleTimeExpired() {
+        switch currentPhase {
+        case .listening(false):
+            startPhase(.listening(isReviewWindow: true))
+        case .listening(true):
+            startPhase(.reading)
+        case .reading:
+            startPhase(.writing)
+        case .writing:
+            startPhase(.completed)
+        default:
+            break
+        }
+    }
+    
+    func toggleFlag(for questionID: Int) {
+        if let idx = questions.firstIndex(where: { $0.id == questionID }) {
+            questions[idx].isFlagged.toggle()
+        }
+    }
+}
+
+3. Top Countdown Timer & Bottom Navigation (UI/Components/)
+Replicates the official top-center timer (which flashes/alerts at 10 and 5 minutes remaining) and the bottom question navigation bar with flag indicators.
+import SwiftUI
+
+struct TimerHeaderView: View {
+    @ObservedObject var viewModel: ExamSessionViewModel
+    @State private var pulseOpacity: Double = 1.0
+    
+    var formattedTime: String {
+        let minutes = viewModel.remainingSeconds / 60
+        let seconds = viewModel.remainingSeconds % 60
+        return String(format: "%02d:%02d", minutes, seconds)
+    }
+    
+    var body: some View {
+        HStack {
+            Text("East India — English Test Simulator")
+                .font(.headline)
+                .foregroundStyle(.secondary)
+            
+            Spacer()
+            
+            // Top-Center Timer
+            HStack(spacing: 6) {
+                Image(systemName: "clock")
+                Text(formattedTime)
+                    .font(.system(.title3, design: .monospaced).bold())
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 6)
+            .background(
+                RoundedRectangle(cornerRadius: 6)
+                    .fill(viewModel.isTimerCriticalWarning ? Color.red.opacity(0.2) :
+                          viewModel.isTimerFlashingWarning ? Color.orange.opacity(0.2) : Color.clear)
+            )
+            .foregroundStyle(
+                viewModel.isTimerCriticalWarning ? .red :
+                viewModel.isTimerFlashingWarning ? .orange : .primary
+            )
+            .opacity(pulseOpacity)
+            .onChange(of: viewModel.remainingSeconds) { _, newValue in
+                if newValue == 600 || newValue == 300 {
+                    withAnimation(.easeInOut(duration: 0.35).repeatCount(6, autoreverses: true)) {
+                        pulseOpacity = 0.25
+                    }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 2.2) {
+                        pulseOpacity = 1.0
+                    }
+                }
+            }
+            
+            Spacer()
+            
+            // "Hide Screen" button (Timer continues running)
+            Button("Hide Screen") {
+                viewModel.isScreenHiddenForBreak = true
+            }
+            .buttonStyle(.bordered)
+            
+            Button("Submit Section") {
+                advanceManually()
+            }
+            .buttonStyle(.borderedProminent)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .background(.bar)
+    }
+    
+    private func advanceManually() {
+        switch viewModel.currentPhase {
+        case .listening:
+            viewModel.startPhase(.reading)
+        case .reading:
+            viewModel.startPhase(.writing)
+        case .writing:
+            viewModel.startPhase(.completed)
+        default:
+            break
+        }
+    }
+}
+
+struct QuestionNavBar: View {
+    @ObservedObject var viewModel: ExamSessionViewModel
+    
+    var body: some View {
+        HStack(spacing: 12) {
+            Text("Questions:")
+                .font(.subheadline.bold())
+            
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    ForEach(Array(viewModel.questions.enumerated()), id: \.element.id) { index, question in
+                        Button {
+                            viewModel.currentQuestionIndex = index
+                        } label: {
+                            VStack(spacing: 2) {
+                                // Flag indicator at top of button
+                                Circle()
+                                    .fill(question.isFlagged ? Color.orange : Color.clear)
+                                    .frame(width: 6, height: 6)
+                                
+                                Text("\(question.number)")
+                                    .font(.system(.callout, design: .monospaced).bold())
+                                    .frame(width: 32, height: 28)
+                                    .background(
+                                        RoundedRectangle(cornerRadius: 4)
+                                            .fill(viewModel.currentQuestionIndex == index ? Color.accentColor :
+                                                  !question.userAnswer.isEmpty ? Color.secondary.opacity(0.25) : Color.clear)
+                                    )
+                                    .foregroundStyle(viewModel.currentQuestionIndex == index ? .white : .primary)
+                                    .overlay(
+                                        RoundedRectangle(cornerRadius: 4)
+                                            .stroke(Color.secondary.opacity(0.4), lineWidth: 1)
+                                    )
+                            }
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Question \(question.number), \(question.userAnswer.isEmpty ? "Unanswered" : "Answered")\(question.isFlagged ? ", Flagged" : "")")
+                    }
+                }
+            }
+            
+            Spacer()
+            
+            if viewModel.questions.indices.contains(viewModel.currentQuestionIndex) {
+                let currentQ = viewModel.questions[viewModel.currentQuestionIndex]
+                Button {
+                    viewModel.toggleFlag(for: currentQ.id)
+                } label: {
+                    Label(currentQ.isFlagged ? "Unflag" : "Flag for Review",
+                          systemImage: currentQ.isFlagged ? "flag.fill" : "flag")
+                }
+                .buttonStyle(.bordered)
+                .tint(currentQ.isFlagged ? .orange : .primary)
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .background(.bar)
+    }
+}
+
+4. Split-Screen Reading & Writing Views (UI/Modules/)
+Implements the Reading Split-Screen (independent left passage scroll and right questions scroll, plus AppKit NSTextView wrapper for right-click text highlighting) and the Writing Split-Screen (left prompt, right editor with live bottom-left word count).
+import SwiftUI
+import AppKit
+
+// AppKit NSTextView wrapper to support right-click "Highlight" on passage text
+struct HighlightablePassageView: NSViewRepresentable {
+    let text: String
+    @Binding var highlights: [HighlightRange]
+    
+    func makeNSView(context: Context) -> NSScrollView {
+        let scrollView = NSTextView.scrollableTextView()
+        guard let textView = scrollView.documentView as? NSTextView else { return scrollView }
+        
+        textView.isEditable = false
+        textView.isSelectable = true
+        textView.font = NSFont.systemFont(ofSize: 16)
+        textView.textContainerInset = NSSize(width: 16, height: 16)
+        textView.string = text
+        textView.delegate = context.coordinator
+        return scrollView
+    }
+    
+    func updateNSView(_ nsView: NSScrollView, context: Context) {
+        guard let textView = nsView.documentView as? NSTextView,
+              let storage = textView.textStorage else { return }
+        
+        let fullRange = NSRange(location: 0, length: storage.length)
+        storage.removeAttribute(.backgroundColor, range: fullRange)
+        
+        for item in highlights {
+            let range = NSRange(location: item.rangeLocation, length: item.rangeLength)
+            if range.location + range.length <= storage.length {
+                storage.addAttribute(.backgroundColor, value: NSColor.systemYellow.withAlphaComponent(0.45), range: range)
+            }
+        }
+    }
+    
+    func makeCoordinator() -> Coordinator {
+        Coordinator(self)
+    }
+    
+    class Coordinator: NSObject, NSTextViewDelegate {
+        var parent: HighlightablePassageView
+        init(_ parent: HighlightablePassageView) { self.parent = parent }
+        
+        func textView(_ view: NSTextView, menu: NSMenu, for event: NSEvent, at charIndex: Int) -> NSMenu? {
+            let selectedRange = view.selectedRange()
+            if selectedRange.length > 0 {
+                let highlightItem = NSMenuItem(
+                    title: "Highlight Selection",
+                    action: #selector(addHighlight(_:)),
+                    keyEquivalent: ""
+                )
+                highlightItem.target = self
+                highlightItem.representedObject = NSValue(range: selectedRange)
+                menu.insertItem(highlightItem, at: 0)
+                
+                let clearItem = NSMenuItem(
+                    title: "Clear Highlights",
+                    action: #selector(clearHighlights),
+                    keyEquivalent: ""
+                )
+                clearItem.target = self
+                menu.insertItem(clearItem, at: 1)
+                menu.insertItem(NSMenuItem.separator(), at: 2)
+            }
+            return menu
+        }
+        
+        @objc func addHighlight(_ sender: NSMenuItem) {
+            guard let rangeValue = sender.representedObject as? NSValue else { return }
+            let nsRange = rangeValue.rangeValue
+            parent.highlights.append(HighlightRange(rangeLocation: nsRange.location, rangeLength: nsRange.length))
+        }
+        
+        @objc func clearHighlights() {
+            parent.highlights.removeAll()
+        }
+    }
+}
+
+struct ReadingSplitView: View {
+    @ObservedObject var viewModel: ExamSessionViewModel
+    
+    var body: some View {
+        HSplitView {
+            // Left Pane: Independently Scrolling Passage with Right-Click Highlighting
+            VStack(alignment: .leading, spacing: 8) {
+                Text(viewModel.readingPassageTitle)
+                    .font(.title2.bold())
+                    .padding([.top, .horizontal], 16)
+                
+                Text("Tip: Select any text and right-click to highlight key phrases.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 16)
+                
+                HighlightablePassageView(
+                    text: viewModel.readingPassageText,
+                    highlights: $viewModel.highlights
+                )
+            }
+            .frame(minWidth: 380, maxWidth: .infinity, maxHeight: .infinity)
+            
+            // Right Pane: Independently Scrolling Questions List
+            ScrollView {
+                VStack(alignment: .leading, spacing: 24) {
+                    ForEach($viewModel.questions) { $question in
+                        VStack(alignment: .leading, spacing: 10) {
+                            HStack {
+                                Text("Question \(question.number)")
+                                    .font(.headline)
+                                Spacer()
+                                if question.isFlagged {
+                                    Label("Flagged", systemImage: "flag.fill")
+                                        .font(.caption)
+                                        .foregroundStyle(.orange)
+                                }
+                            }
+                            
+                            Text(question.prompt)
+                                .font(.body)
+                            
+                            if let options = question.options {
+                                Picker("", selection: $question.userAnswer) {
+                                    ForEach(options, id: \.self) { option in
+                                        Text(option).tag(option)
+                                    }
+                                }
+                                .pickerStyle(.radioGroup)
+                                .labelsHidden()
+                            } else {
+                                TextField("Type or paste your answer...", text: $question.userAnswer)
+                                    .textFieldStyle(.roundedBorder)
+                            }
+                        }
+                        .padding()
+                        .background(
+                            RoundedRectangle(cornerRadius: 8)
+                                .fill(Color(nsColor: .controlBackgroundColor))
+                        )
+                    }
+                }
+                .padding(16)
+            }
+            .frame(minWidth: 380, maxWidth: .infinity, maxHeight: .infinity)
+        }
+    }
+}
+
+struct WritingSplitView: View {
+    @ObservedObject var viewModel: ExamSessionViewModel
+    
+    var body: some View {
+        HSplitView {
+            // Left Pane: Task Prompt
+            ScrollView {
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("Writing Task 2")
+                        .font(.title2.bold())
+                    Text("You should spend about 40 minutes on this task.")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                    Divider()
+                    Text(viewModel.writingPrompt)
+                        .font(.body)
+                        .lineSpacing(4)
+                }
+                .padding(20)
+            }
+            .frame(minWidth: 340, maxWidth: .infinity, maxHeight: .infinity)
+            
+            // Right Pane: Editor + Live Word Count in Bottom-Left
+            VStack(alignment: .leading, spacing: 8) {
+                TextEditor(text: $viewModel.writingResponse)
+                    .font(.system(size: 15))
+                    .padding(8)
+                    .background(Color(nsColor: .textBackgroundColor))
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 6)
+                            .stroke(Color.secondary.opacity(0.3), lineWidth: 1)
+                    )
+                
+                HStack {
+                    Text("Word count: \(viewModel.wordCount)")
+                        .font(.system(.subheadline, design: .monospaced).bold())
+                        .accessibilityLabel("Current word count \(viewModel.wordCount)")
+                    Spacer()
+                }
+            }
+            .padding(20)
+            .frame(minWidth: 420, maxWidth: .infinity, maxHeight: .infinity)
+        }
+    }
+}
+
+5. Main Window Scene & Hide Overlay (UI/ExamContainerView.swift & EastIndiaApp.swift)
+Ties together the state machine, the "Hide Screen" break overlay (which covers the screen while keeping the exam clock running), and the compliance disclaimer.
+import SwiftUI
+
+struct ExamContainerView: View {
+    @StateObject private var viewModel = ExamSessionViewModel()
+    
+    var body: some View {
+        ZStack {
+            VStack(spacing: 0) {
+                switch viewModel.currentPhase {
+                case .intro:
+                    IntroScreenView(viewModel: viewModel)
+                case .familiarisation, .finalInstructions:
+                    InstructionsScreenView(viewModel: viewModel)
+                case .listening(let isReview):
+                    TimerHeaderView(viewModel: viewModel)
+                    Divider()
+                    VStack(spacing: 16) {
+                        Image(systemName: isReview ? "checkmark.circle.badge.questionmark" : "headphones")
+                            .font(.system(size: 48))
+                            .foregroundStyle(.tint)
+                        Text(isReview ? "2-Minute Review Window" : "Listening Audio Playing (Once Only)")
+                            .font(.title2.bold())
+                        Text("Check your answers below. Audio cannot be rewound.")
+                            .foregroundStyle(.secondary)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    Divider()
+                    QuestionNavBar(viewModel: viewModel)
+                case .reading:
+                    TimerHeaderView(viewModel: viewModel)
+                    Divider()
+                    ReadingSplitView(viewModel: viewModel)
+                    Divider()
+                    QuestionNavBar(viewModel: viewModel)
+                case .writing:
+                    TimerHeaderView(viewModel: viewModel)
+                    Divider()
+                    WritingSplitView(viewModel: viewModel)
+                case .completed:
+                    VStack(spacing: 16) {
+                        Image(systemName: "flag.checkered")
+                            .font(.system(size: 48))
+                            .foregroundStyle(.green)
+                        Text("Practice Session Complete")
+                            .font(.largeTitle.bold())
+                        Button("Return to Start") {
+                            viewModel.startPhase(.intro)
+                        }
+                        .buttonStyle(.borderedProminent)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+            }
+            
+            // "Hide Screen" Overlay (Timer continues underneath)
+            if viewModel.isScreenHiddenForBreak {
+                Color.black.opacity(0.92)
+                    .ignoresSafeArea()
+                    .overlay {
+                        VStack(spacing: 16) {
+                            Image(systemName: "eye.slash.fill")
+                                .font(.system(size: 44))
+                                .foregroundStyle(.white)
+                            Text("Screen Hidden")
+                                .font(.title.bold())
+                                .foregroundStyle(.white)
+                            Text("Please note: Your test timer is still running.")
+                                .foregroundStyle(.white.opacity(0.8))
+                            Button("Resume Practice") {
+                                viewModel.isScreenHiddenForBreak = false
+                            }
+                            .buttonStyle(.borderedProminent)
+                        }
+                    }
+            }
+        }
+        .frame(minWidth: 1024, minHeight: 700)
+    }
+}
+
+struct IntroScreenView: View {
+    @ObservedObject var viewModel: ExamSessionViewModel
+    
+    var body: some View {
+        VStack(spacing: 20) {
+            Text("East India")
+                .font(.system(size: 36, weight: .bold))
+            Text("Computer-Delivered English Exam Simulator")
+                .font(.title3)
+                .foregroundStyle(.secondary)
+            
+            VStack(alignment: .leading, spacing: 10) {
+                Label("Listening: 30 minutes single-play audio + 2 minutes review", systemImage: "headphones")
+                Label("Reading: 60 minutes split-screen with text highlighting", systemImage: "book.pages")
+                Label("Writing: 60 minutes with live word counter", systemImage: "keyboard")
+            }
+            .padding()
+            .background(RoundedRectangle(cornerRadius: 10).fill(.quaternary))
+            
+            HStack(spacing: 16) {
+                Button("Start Full Simulation") {
+                    viewModel.startPhase(.listening(isReviewWindow: false))
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+                
+                Button("Jump to Reading Split-Screen") {
+                    viewModel.startPhase(.reading)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.large)
+            }
+            
+            Text("Disclaimer: East India is an independent practice simulator and is not affiliated with or endorsed by official testing partners.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .padding(.top, 24)
+        }
+        .padding(40)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+struct InstructionsScreenView: View {
+    @ObservedObject var viewModel: ExamSessionViewModel
+    var body: some View {
+        VStack(spacing: 16) {
+            Text("Final Instructions").font(.title.bold())
+            Button("Begin Listening") {
+                viewModel.startPhase(.listening(isReviewWindow: false))
+            }
+        }
+    }
+}
+
+@main
+struct EastIndiaApp: App {
+    var body: some Scene {
+        Window("East India Simulator", id: "main-simulator") {
+            ExamContainerView()
+        }
+        .windowToolbarStyle(.unifiedCompact)
+    }
+}
+
+Which module should we flesh out next?
+ * Single-Play Audio Engine (AudioService.swift): AVPlayer/AVAudioRecorder implementation with a "Sound Check" step, disabled scrubbing, volume slider, and automatic transition into the 2-minute review window.
+ * Study Scheduler (CalendarService.swift & ReminderService.swift): EventKit integration with conflict detection, Info.plist permission strings, and UNUserNotificationCenter fallback.
+ * Local Persistence (GRDB / SQLite): Auto-saving exam state every few seconds so accidental app closures restore seamlessly.

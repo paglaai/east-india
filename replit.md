@@ -1,6 +1,6 @@
-# [Project name]
+# East India
 
-_Replace the heading above with the project's name, and this line with one sentence describing what this app does for users._
+A native macOS practice simulator for computer-delivered English exams, with timed sections and automatic local session recovery.
 
 ## Run & Operate
 
@@ -9,7 +9,7 @@ _Replace the heading above with the project's name, and this line with one sente
 - `pnpm run build` — typecheck + build all packages
 - `pnpm --filter @workspace/api-spec run codegen` — regenerate API hooks and Zod schemas from the OpenAPI spec
 - `pnpm --filter @workspace/db run push` — push DB schema changes (dev only)
-- Required env: `DATABASE_URL` — Postgres connection string
+- Shared API server env: `DATABASE_URL` — Postgres connection string. The native East India app does not require it.
 
 ## Stack
 
@@ -22,15 +22,22 @@ _Replace the heading above with the project's name, and this line with one sente
 
 ## Where things live
 
-_Populate as you build — short repo map plus pointers to the source-of-truth file for DB schema, API contracts, theme files, etc._
+- `native/EastIndia/` — macOS Swift package, opened and run with Xcode on macOS
+- `native/EastIndia/Sources/EastIndia/Domain/` — exam phases, questions, and session state
+- `native/EastIndia/Sources/EastIndia/Data/` — local session persistence
+- `native/EastIndia/Sources/EastIndia/Services/` — exam flow and timer behavior
+- `native/EastIndia/Sources/EastIndia/UI/` — SwiftUI screens and AppKit passage highlighting
 
 ## Architecture decisions
 
-_Populate as you build — non-obvious choices a reader couldn't infer from the code (3-5 bullets)._
+- The native macOS app is a Swift package under `native/EastIndia`; the pnpm workspace services are not part of its runtime.
+- Session state is stored as versioned JSON in local `UserDefaults` for this single-session prototype; no account, server, or database is required.
+- Timed sections persist an absolute deadline so closing the app does not pause the exam clock.
+- SwiftUI/AppKit compilation and runtime verification require Xcode on macOS; this Linux workspace cannot run the native app.
 
 ## Product
 
-_Describe the high-level user-facing capabilities of this app once they exist._
+Users can practice timed listening, reading, and writing sections, save answers and passage highlights locally, and resume a session without losing time or progress.
 
 ## User preferences
 
